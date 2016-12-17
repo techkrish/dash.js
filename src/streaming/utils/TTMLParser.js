@@ -28,9 +28,9 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import FactoryMaker from '../../core/FactoryMaker.js';
-import X2JS from '../../../externals/xml2json.js';
-import Debug from '../../core/Debug.js';
+import FactoryMaker from '../../core/FactoryMaker';
+import X2JS from '../../../externals/xml2json';
+import Debug from '../../core/Debug';
 
 const SECONDS_IN_HOUR = 60 * 60; // Expression of an hour in seconds
 const SECONDS_IN_MIN = 60; // Expression of a minute in seconds
@@ -60,7 +60,10 @@ function TTMLParser() {
         unicodeBidi,
         displayAlign,
         writingMode,
-        videoModel;
+        videoModel,
+        converter;
+
+    let cueCounter = 0; // Used to give every cue a unique ID.
 
     function setConfig(config) {
         if (!config) return;
@@ -71,48 +74,181 @@ function TTMLParser() {
     }
 
     /**
+     * Get the begin-end interval if present, or null otherwise.
+     *
+     * @param {Object} element - TTML element which may have begin and end attributes
+     */
+    function getInterval(element) {
+        if (element.hasOwnProperty('begin') && element.hasOwnProperty('end')) {
+            let beginTime = parseTimings(element.begin);
+            let endTime = parseTimings(element.end);
+            return [beginTime, endTime];
+        } else {
+            return null;
+        }
+    }
+
+    function getCueID() {
+        let id = 'cue_TTML_' + cueCounter;
+        cueCounter++;
+        return id;
+    }
+
+    /*
+    * Create list of intervals where spans start and end. Empty list if no times.
+    * Clip to interval using startInterval and endInterval and add these two times.
+    * Also support case when startInterval/endInteval not given (sideloaded file)
+    *
+    * @param {Array} spans - array of span elements
+    */
+    function createSpanIntervalList(spans, startInterval, endInterval) {
+
+        let spanChangeTimes = [];
+        let spanChangeTimeStrings = [];
+        let cue_intervals = [];
+
+        function addSpanTime(span, name) {
+            if (span.hasOwnProperty(name)) {
+                let timeString = span[name];
+                if (spanChangeTimeStrings.indexOf(timeString) < 0) {
+                    spanChangeTimeStrings.push(timeString);
+                }
+            }
+        }
+
+        for (let i = 0; i < spans.length; i++) {
+            let span = spans[i];
+            addSpanTime(span, 'begin');
+            addSpanTime(span, 'end');
+        }
+        if (spanChangeTimeStrings.length === 0) {
+            return cue_intervals; // No span timing so no intervals.
+        }
+
+        if (typeof startInterval !== 'undefined' && typeof endInterval !== 'undefined' ) {
+            for (let i = 0; i < spanChangeTimeStrings.length; i++) {
+                let changeTime = parseTimings(spanChangeTimeStrings[i]);
+                if (startInterval < changeTime && changeTime < endInterval) {
+                    spanChangeTimes.push(changeTime);
+                }
+            }
+            spanChangeTimes.push(startInterval);
+            spanChangeTimes.push(endInterval);
+        } else {
+            for (let i = 0; i < spanChangeTimeStrings.length; i++) {
+                spanChangeTimes.push(parseTimings(spanChangeTimeStrings[i]));
+            }
+        }
+        spanChangeTimes.sort(function (a, b) { return a - b;});
+        for (let i = 0; i < spanChangeTimes.length - 1; i++) {
+            cue_intervals.push([spanChangeTimes[i], spanChangeTimes[i + 1]]);
+        }
+        return cue_intervals;
+    }
+
+
+    function clipStartTime(startTime, intervalStart) {
+        if (typeof startInterval !== 'undefined') {
+            if (startTime < intervalStart) {
+                startTime = intervalStart;
+            }
+        }
+        return startTime;
+    }
+
+
+    function clipEndTime(endTime, intervalEnd) {
+        if (typeof intervalEnd !== 'undefined') {
+            if (endTime > intervalEnd) {
+                endTime = intervalEnd;
+            }
+        }
+        return endTime;
+    }
+
+    /*
+     * Get interval from entity that has begin and end properties.
+     * If intervalStart and intervalEnd defined, use them to clip the interval.
+     * Return null if no overlap with interval
+     */
+    function getClippedInterval(entity, intervalStart, intervalEnd) {
+        let startTime = parseTimings(entity.begin);
+        let endTime = parseTimings(entity.end);
+        startTime = clipStartTime(startTime, intervalStart);
+        endTime = clipEndTime(endTime, intervalEnd);
+        if (typeof intervalStart !== 'undefined' && typeof intervalEnd !== 'undefined') {
+            if (endTime < intervalStart || startTime > intervalEnd) {
+                log('TTML: Cue ' + startTime + '-' + endTime + ' outside interval ' +
+                            intervalStart + '-' + intervalEnd);
+                return null;
+            }
+        }
+        return [startTime, endTime];
+    }
+
+    /*
+     * Check if entity timing has some overlap with interval
+     */
+    function inIntervalOrNoTiming(entity, interval) {
+        let inInterval = true;
+        if (entity.hasOwnProperty('span')) {
+            let entityInterval = getInterval(entity.span);
+            if (entityInterval !== null) { //Timing
+                inInterval = (entityInterval[0] < interval[1] && entityInterval[1] > interval[0]);
+            }
+        }
+        return inInterval;
+    }
+
+    /**
      * Parse the raw data and process it to return the HTML element representing the cue.
      * Return the region to be processed and controlled (hide/show) by the caption controller.
-     * @param data: raw data received from the TextSourceBuffer
-     **/
+     * @param {string} data - raw data received from the TextSourceBuffer
+     * @param {number} intervalStart
+     * @param {number} intervalEnd
+     * @param {array} imageArray - images represented as binary strings
+     */
 
-    function parse(data, intervalStart, intervalEnd) {
+    function parse(data, intervalStart, intervalEnd, imageArray) {
         let tt, // Top element
             head, // head in tt
             body, // body in tt
-            type;
+            ttExtent, // extent attribute of tt element
+            type,
+            i;
 
         var errorMsg = '';
-
-        let converter = new X2JS([], '', false);
 
         // Parse the TTML in a JSON object.
         ttml = converter.xml_str2json(data);
 
         if (!ttml) {
-            throw 'TTML document could not be parsed';
+            throw new Error('TTML document could not be parsed');
         }
 
         if (videoModel.getTTMLRenderingDiv()) {
             type = 'html';
         }
 
-        // Get the namespace if there is one defined in the JSON object.
-        var ttNS = getNamespacePrefix(ttml, 'http://www.w3.org/ns/ttml');
-
-        // Remove the namespace before each node if it exists:
-        if (ttNS) {
-            removeNamespacePrefix(ttml, ttNS);
-        }
-
         // Check the document and compare to the specification (TTML and EBU-TT-D).
         tt = ttml.tt;
         if (!tt) {
-            throw 'TTML document lacks tt element';
+            throw new Error('TTML document lacks tt element');
         }
+
+        // Get the namespace if there is one defined in the JSON object.
+        var ttNS = getNamespacePrefix(tt, 'http://www.w3.org/ns/ttml');
+
+        // Remove the namespace before each node if it exists:
+        if (ttNS) {
+            removeNamespacePrefix(tt, ttNS);
+        }
+
+        ttExtent = tt['tts:extent']; // Should check that tts is right namespace.
+
         head = tt.head;
         if (!head) {
-            throw 'TTML document lacks head element';
+            throw new Error('TTML document lacks head element');
         }
         if (head.layout) {
             ttmlLayout = head.layout.region_asArray; //Mandatory in EBU-TT-D
@@ -120,9 +256,32 @@ function TTMLParser() {
         if (head.styling) {
             ttmlStyling = head.styling.style_asArray; // Mandatory in EBU-TT-D
         }
+
+        let imageDataUrls = {};
+
+        if (imageArray) {
+            for (i = 0; i < imageArray.length; i++) {
+                let key = 'urn:mpeg:14496-30:subs:' + (i + 1).toString();
+                let dataUrl = 'data:image/png;base64,' + btoa(imageArray[i]);
+                imageDataUrls[key] = dataUrl;
+            }
+        }
+
+        if (head.metadata) {
+            let embeddedImages = head.metadata.image_asArray; // Handle embedded images
+            if (embeddedImages) {
+                for (i = 0; i < embeddedImages.length; i++) {
+                    let key = '#' + embeddedImages[i]['xml:id'];
+                    let imageType = embeddedImages[i].imagetype.toLowerCase();
+                    let dataUrl = 'data:image/' + imageType + ';base64,' + embeddedImages[i].__text;
+                    imageDataUrls[key] = dataUrl;
+                }
+            }
+        }
+
         body = tt.body;
         if (!body) {
-            throw 'TTML document lacks body element';
+            throw new Error('TTML document lacks body element');
         }
 
         // Extract the cellResolution information
@@ -138,7 +297,7 @@ function TTMLParser() {
 
         var regions = [];
         if (ttmlLayout) {
-            for (var i = 0; i < ttmlLayout.length; i++) {
+            for (i = 0; i < ttmlLayout.length; i++) {
                 regions.push(processRegion(JSON.parse(JSON.stringify(ttmlLayout[i])), cellUnit));
             }
         }
@@ -147,115 +306,108 @@ function TTMLParser() {
         var nsttp = getNamespacePrefix(ttml.tt, 'http://www.w3.org/ns/ttml#parameter');
 
         // Set the framerate.
-        if (ttml.tt.hasOwnProperty(nsttp + ':frameRate')) {
-            ttml.tt.frameRate = parseInt(ttml.tt[nsttp + ':frameRate'], 10);
+        if (tt.hasOwnProperty(nsttp + ':frameRate')) {
+            tt.frameRate = parseInt(tt[nsttp + ':frameRate'], 10);
         }
         var captionArray = [];
         // Extract the div
-        var divs = ttml.tt.body_asArray[0].__children;
+        var divs = tt.body_asArray[0].__children;
 
-        divs.forEach(function (div) {
-            var cues = div.div.p_asArray;
+        // Timing is either on div, paragraph or span level.
 
+        for (let k = 0; k < divs.length; k++) {
+            let div = divs[k].div;
+            let divInterval = null; // This is mainly for image subtitles.
+
+            if (null !== (divInterval = getInterval(div))) {
+                // Timing on div level is not allowed by EBU-TT-D.
+                // We only use it for SMPTE-TT image subtitle profile.
+
+                // Layout should be defined by a region. Given early test material, we also support that it is on
+                // div level
+                let layout;
+                if (div.region) {
+                    let region = findRegionFromID(ttmlLayout, div.region);
+                    layout = getRelativePositioning(region, ttExtent);
+                }
+                if (!layout) {
+                    layout = getRelativePositioning(div, ttExtent);
+                }
+
+                let imgKey = div['smpte:backgroundImage'];
+                if (imgKey !== undefined && imageDataUrls[imgKey] !== undefined) {
+                    captionArray.push({
+                        start: divInterval[0],
+                        end: divInterval[1],
+                        id: getCueID(),
+                        data: imageDataUrls[imgKey],
+                        type: 'image',
+                        layout: layout
+                    });
+                }
+                continue; // Next div
+            }
+
+            let paragraphs = div.p_asArray;
             // Check if cues is not empty or undefined.
-            if (!cues || cues.length === 0) {
-                errorMsg = 'TTML document does not contain any cues';
-            } else {
+            if (divInterval === null && (!paragraphs || paragraphs.length === 0)) {
+                errorMsg = 'TTML has div that contains no timing and no paragraphs.';
+                log(errorMsg);
+                return captionArray;
+            }
 
-                /*** Parsing of every cue.
-                 *
-                 * cues: List of the cues found in the ttml parsing.
-                 *       We iterate on this list.
-                 * cue: Every cue is parsed individually and creates an HTML element with its style and children.
-                 *
-                 * pElements: all the nodes that can be found in the paragraph.
-                 *
-                 * ***/
-
-                // Caption array is the final result return containing all the cues' information.
-                var pStartTime;
-                var pEndTime;
-                var spanStartTime;
-                var spanEndTime;
-                cues.forEach(function (cue) {
-
-                    // Obtain the start and end time of the cue.
-                    if (cue.hasOwnProperty('begin') && cue.hasOwnProperty('end')) {
-                        pStartTime = parseTimings(cue.begin);
-                        pEndTime = parseTimings(cue.end);
-                    } else if (cue.span.hasOwnProperty('begin') && cue.span.hasOwnProperty('end')) {
-                        spanStartTime = parseTimings(cue.span.begin);
-                        spanEndTime = parseTimings(cue.span.end);
-                    } else {
-                        errorMsg = 'TTML document has incorrect timing value';
-                        throw errorMsg;
+            for (let j2 = 0; j2 < paragraphs.length; j2++) {
+                let paragraph = paragraphs[j2];
+                let spans = paragraph.span_asArray;
+                let cueIntervals = [];
+                // For timing, the overall goal is to find the intervals where there should be cues
+                // The timing may either be on paragraph or span level.
+                if (paragraph.hasOwnProperty('begin') && paragraph.hasOwnProperty('end')) {
+                    // Timing on paragraph level
+                    let clippedInterval = getClippedInterval(paragraph, intervalStart, intervalEnd);
+                    if (clippedInterval !== null) {
+                        cueIntervals.push(clippedInterval);
                     }
-                    let cueStartTime = spanStartTime || pStartTime;
-                    let cueEndTime = spanEndTime || pEndTime;
+                } else {
+                    // Timing must be on span level
+                    cueIntervals = createSpanIntervalList(spans, intervalStart, intervalEnd);
+                }
+                if (cueIntervals.length === 0) {
+                    errorMsg = 'TTML: Empty paragraph';
+                    continue; // Nothing in this paragraph
+                }
 
-                    if (typeof intervalStart !== 'undefined' && typeof intervalEnd !== 'undefined') {
-                        if (cueEndTime < intervalStart || cueStartTime > intervalEnd) {
-                            log('TTML: Cue interval ' + cueStartTime + '-' + cueEndTime +
-                                ' outside sample interval ' + intervalStart + '-' + intervalEnd + '. Dropped');
-                            return;
-                        } else {
-                            let clipped = false;
-                            let origStart = cueStartTime;
-                            let origEnd = cueEndTime;
-                            if (cueStartTime < intervalStart) {
-                                clipped = true;
-                                cueStartTime = intervalStart;
-                            }
-                            if (cueEndTime > intervalEnd) {
-                                clipped = true;
-                                cueEndTime = intervalEnd;
-                            }
-                            if (clipped) {
-                                log('TTML: Clipped cue ' + origStart + '-' + origEnd + ' to ' +
-                                    cueStartTime + '-' + cueEndTime);
-                            }
+                let paragraphChildren = paragraph.__children;
+
+                for (let i2 = 0; i2 < cueIntervals.length; i2++) {
+                    let interval = cueIntervals[i2];
+                    let childrenInInterval = [];
+                    for (let k2 = 0; k2 < paragraphChildren.length; k2++) {
+                        let child = paragraphChildren[k2];
+                        if (inIntervalOrNoTiming(child, interval)) {
+                            childrenInInterval.push(child);
                         }
                     }
+                    if (childrenInInterval.length === 0) {
+                        continue; // No children to render
+                    }
 
-                    if (cue['smpte:backgroundImage'] !== undefined) {
-                        var images = ttml.tt.head.metadata.image_asArray;
-                        for (var j = 0; j < images.length; j++) {
-                            if (('#' + images[j]['xml:id']) == cue['smpte:backgroundImage']) {
-                                captionArray.push({
-                                    start: cueStartTime,
-                                    end: cueEndTime,
-                                    id: images[j]['xml:id'],
-                                    data: 'data:image/' + images[j].imagetype.toLowerCase() + ';base64, ' + images[j].__text,
-                                    type: 'image'
-                                });
-                            }
-                        }
-                    } else if (type === 'html') {
+                    if (type === 'html') {
                         lineHeight = {};
                         linePadding = {};
                         fontSize = {};
-                        var cueID = '';
-                        if (cue.hasOwnProperty('id') || cue.hasOwnProperty('xml:id')) {
-                            cueID = cue['xml:id'] || cue.id;
-                        }
-                        // Error if timing is not specified.
-                        // TODO: check with the specification what is allowed.
-                        if ((isNaN(pStartTime) || isNaN(pEndTime)) && (isNaN(spanStartTime) || isNaN(spanEndTime))) {
-                            errorMsg = 'TTML document has incorrect timing value';
-                            throw errorMsg;
-                        }
 
                         /**
                          * Find the region defined for the cue.
                          */
                         // properties to be put in the "captionRegion" HTML element.
-                        var cueRegionProperties = constructCueRegion(cue, div.div, cellUnit);
+                        var cueRegionProperties = constructCueRegion(paragraph, div, cellUnit);
 
                         /**
                          * Find the style defined for the cue.
                          */
                         // properties to be put in the "paragraph" HTML element.
-                        var cueStyleProperties = constructCueStyle(cue, cellUnit);
+                        var cueStyleProperties = constructCueStyle(paragraph, cellUnit);
 
                         /**
                          * /!\ Create the cue HTML Element containing the whole cue.
@@ -267,13 +419,10 @@ function TTMLParser() {
                         var cueParagraph = document.createElement('div');
                         cueParagraph.className = styleIDs;
 
-                        // Stock the element in the subtitle (in p) in an array (in case there are only one value).
-                        var pElements = cue.__children;
-
-                        // Create an wrapper containing the cue information about unicodeBidi and direction
+                        // Create a wrapper containing the cue information about unicodeBidi and direction
                         // as they need to be defined on at this level.
                         // We append to the wrapper the cue itself.
-                        var cueDirUniWrapper = constructCue(pElements, cellUnit);
+                        var cueDirUniWrapper = constructCue(childrenInInterval, cellUnit);
                         cueDirUniWrapper.className = 'cueDirUniWrapper';
 
                         // If the style defines these two properties, we place them in cueContainer
@@ -324,7 +473,7 @@ function TTMLParser() {
                         // Final cue.
                         var finalCue = document.createElement('div');
                         finalCue.appendChild(cueParagraph);
-                        finalCue.id = 'subtitle_' + cueID;
+                        finalCue.id = getCueID();
                         finalCue.style.cssText = 'position: absolute; margin: 0; display: flex; box-sizing: border-box; pointer-events: none;' + cueRegionProperties;
 
                         if (Object.keys(fontSize).length === 0) {
@@ -333,13 +482,13 @@ function TTMLParser() {
 
                         // We add all the cue information in captionArray.
                         captionArray.push({
-                            start: cueStartTime,
-                            end: cueEndTime,
+                            start: interval[0],
+                            end: interval[1],
                             type: 'html',
                             cueHTMLElement: finalCue,
                             regions: regions,
                             regionID: regionID,
-                            cueID: cueID,
+                            cueID: finalCue.id,
                             videoHeight: videoHeight,
                             videoWidth: videoWidth,
                             cellResolution: cellResolution,
@@ -352,7 +501,7 @@ function TTMLParser() {
 
                     } else {
                         var text = '';
-                        var textElements = cue.__children;
+                        var textElements = childrenInInterval;
                         if (textElements.length) {
                             textElements.forEach(function (el) {
                                 if (el.hasOwnProperty('span')) {
@@ -380,16 +529,15 @@ function TTMLParser() {
                         }
 
                         captionArray.push({
-                            start: cueStartTime,
-                            end: cueEndTime,
+                            start: interval[0],
+                            end: interval[1],
                             data: text,
                             type: 'text'
                         });
-
                     }
-                });
+                }
             }
-        });
+        }
 
         if (errorMsg !== '') {
             log(errorMsg);
@@ -397,8 +545,8 @@ function TTMLParser() {
 
         if (captionArray.length > 0) {
             return captionArray;
-        } else {
-            throw errorMsg;
+        } else { // This seems too strong given that there are segments with no TTML subtitles
+            throw new Error(errorMsg);
         }
     }
 
@@ -411,8 +559,8 @@ function TTMLParser() {
         lineHeight = {};
         linePadding = {};
         defaultLayoutProperties = {
-            'top': '85%;',
-            'left': '5%;',
+            'top': 'auto;',
+            'left': 'auto;',
             'width': '90%;',
             'height': '10%;',
             'align-items': 'flex-start;',
@@ -498,6 +646,15 @@ function TTMLParser() {
                 '-webkit-text-orientation: upright;' +
                 'text-orientation: upright;'
         };
+        converter = new X2JS({
+            escapeMode:         false,
+            attributePrefix:    '',
+            arrayAccessForm:    'property',
+            emptyNodeForm:      'object',
+            stripWhitespaces:   false,
+            enableToStringFunc: false,
+            matchers:           []
+        });
     }
 
     function parseTimings(timingStr) {
@@ -555,9 +712,13 @@ function TTMLParser() {
                         removeNamespacePrefix(json[key][i], nsPrefix);
                     }
                 }
-                var newKey = key.slice(key.indexOf(nsPrefix) + nsPrefix.length + 1);
-                json[newKey] = json[key];
-                delete json[key];
+                var fullNsPrefix = nsPrefix + ':';
+                var nsPrefixPos = key.indexOf(fullNsPrefix);
+                if (nsPrefixPos >= 0) {
+                    var newKey = key.slice(nsPrefixPos + fullNsPrefix.length);
+                    json[newKey] = json[key];
+                    delete json[key];
+                }
             }
         }
     }
@@ -581,6 +742,19 @@ function TTMLParser() {
         });
         // Return the RGBA value for CSS.
         return 'rgba(' + rgb.join(',') + ',' + alpha + ');';
+    }
+
+    // Convert an RGBA value written in TTML rgba(v,v,v,a => 0 to 255) to CSS rgba(v,v,v,a => 0 to 1).
+    function convertAlphaValue(rgbaTTML) {
+        let rgba,
+            alpha,
+            resu;
+
+        rgba = rgbaTTML.replace(/^(rgb|rgba)\(/,'').replace(/\)$/,'').replace(/\s/g,'').split(',');
+        alpha = parseInt(rgba[rgba.length - 1], 10) / 255;
+        resu = 'rgba(' + rgba[0] + ',' + rgba[1] + ',' + rgba[2] + ',' + alpha + ');';
+
+        return resu;
     }
 
     // Return whether or not an array contains a certain text
@@ -622,6 +796,30 @@ function TTMLParser() {
         return primeArray.concat(arrayToAdd);
     }
 
+    function getSizeTypeAndDefinition(cueStyleElement) {
+        let returnTab = new Array(2);
+        let startRef = cueStyleElement.indexOf(':') === -1 ? 0 : cueStyleElement.indexOf(':');
+        let endRef;
+        if (cueStyleElement.indexOf('%') === -1) {
+            if (cueStyleElement.indexOf('c') === -1) {
+                if (cueStyleElement.indexOf('p') === -1) {
+                    returnTab[0] = returnTab[1] = null;
+                } else {
+                    returnTab[0] = 'p';
+                    endRef = cueStyleElement.indexOf('p');
+                }
+            } else {
+                returnTab[0] = 'c';
+                endRef = cueStyleElement.indexOf('c');
+            }
+        } else {
+            returnTab[0] = '%';
+            endRef = cueStyleElement.indexOf('%');
+        }
+        returnTab [1] = cueStyleElement.slice(startRef, endRef);
+        return returnTab;
+    }
+
     /**
      * Processing of styling information:
      * - processStyle: return an array of strings with the cue style under a CSS style form.
@@ -631,8 +829,10 @@ function TTMLParser() {
 
 
     // Compute the style properties to return an array with the cleaned properties.
-    function processStyle(cueStyle, cellUnit) {
+    function processStyle(cueStyle, cellUnit, includeRegionStyles) {
         var properties = [];
+        var valueFtSizeInPx,
+            valueLHSizeInPx;
 
         // Clean up from the xml2json parsing:
         for (var key in cueStyle) {
@@ -662,12 +862,18 @@ function TTMLParser() {
         }
         // Font size is computed from the cellResolution.
         if ('font-size' in cueStyle) {
-            var valueFtSize = parseFloat(cueStyle['font-size'].slice(cueStyle['font-size'].indexOf(':') + 1,
-                cueStyle['font-size'].indexOf('%')));
+            var fontSizeTab = getSizeTypeAndDefinition(cueStyle['font-size']);
+            var valueFtSize = parseFloat(fontSizeTab[1]);
             if ('id' in cueStyle) {
-                fontSize[cueStyle.id] = valueFtSize;
+                fontSize[cueStyle.id] = fontSizeTab;
             }
-            var valueFtSizeInPx = valueFtSize / 100 * cellUnit[1] + 'px;';
+
+            if (fontSizeTab[0] === '%') {
+                valueFtSizeInPx = valueFtSize / 100 * cellUnit[1] + 'px;';
+            } else if (fontSizeTab[0] === 'c') {
+                valueFtSizeInPx = valueFtSize * cellUnit[1] + 'px;';
+            }
+
             properties.push('font-size:' + valueFtSizeInPx);
         }
         // Line height is computed from the cellResolution.
@@ -675,13 +881,19 @@ function TTMLParser() {
             if (cueStyle['line-height'] === 'normal') {
                 properties.push('line-height: normal;');
             } else {
-                var valueLHSize = parseFloat(cueStyle['line-height'].slice(cueStyle['line-height'].indexOf(':') + 1,
-                    cueStyle['line-height'].indexOf('%')));
+                var LineHeightTab = getSizeTypeAndDefinition(cueStyle['line-height']);
+                var valueLHSize = parseFloat(LineHeightTab[1]);
                 if ('id' in cueStyle) {
-                    lineHeight[cueStyle.id] = valueLHSize;
+                    lineHeight[cueStyle.id] = LineHeightTab;
                 }
-                var valueLHSizeInPx = valueLHSize / 100 * cellUnit[1] + 'px;';
-                properties.push('line-height' + ':' + valueLHSizeInPx);
+
+                if (LineHeightTab[0] === '%') {
+                    valueLHSizeInPx = valueLHSize / 100 * cellUnit[1] + 'px;';
+                } else if (LineHeightTab[0] === 'c') {
+                    valueLHSizeInPx = valueLHSize * cellUnit[1] + 'px;';
+                }
+
+                properties.push('line-height:' + valueLHSizeInPx);
             }
         }
         // Font-family can be specified by a generic family name or a custom family name.
@@ -716,19 +928,23 @@ function TTMLParser() {
         if ('background-color' in cueStyle) {
             if (cueStyle['background-color'].indexOf('#') > -1 && (cueStyle['background-color'].length - 1) === 8) {
                 rgbaValue = convertHexToRGBA(cueStyle['background-color']);
-                properties.push('background-color: ' + rgbaValue);
-            } else {
-                properties.push('background-color:' + cueStyle['background-color'] + ';');
+            } else if (cueStyle['background-color'].indexOf('rgba') > -1) {
+                rgbaValue = convertAlphaValue(cueStyle['background-color']);
+            }  else {
+                rgbaValue = cueStyle['background-color'] + ';';
             }
+            properties.push('background-color: ' + rgbaValue);
         }
         // Color can be specified from hexadecimal (RGB or RGBA) value.
         if ('color' in cueStyle) {
             if (cueStyle.color.indexOf('#') > -1 && (cueStyle.color.length - 1) === 8) {
                 rgbaValue = convertHexToRGBA(cueStyle.color);
-                properties.push('color: ' + rgbaValue);
-            } else {
-                properties.push('color:' + cueStyle.color + ';');
+            } else if (cueStyle.color.indexOf('rgba') > -1) {
+                rgbaValue = convertAlphaValue(cueStyle.color);
+            }  else {
+                rgbaValue = cueStyle.color + ';';
             }
+            properties.push('color: ' + rgbaValue);
         }
         // Wrap option is determined by the white-space CSS property.
         if ('wrap-option' in cueStyle) {
@@ -762,6 +978,10 @@ function TTMLParser() {
             properties.push('text-decoration:' + cueStyle['text-decoration'] + ';');
         }
 
+        if (includeRegionStyles) {
+            properties = properties.concat(processRegion(cueStyle, cellUnit));
+        }
+
         // Handle white-space preserve
         if (ttml.tt.hasOwnProperty('xml:space')) {
             if (ttml.tt['xml:space'] === 'preserve') {
@@ -786,7 +1006,7 @@ function TTMLParser() {
         return null;
     }
     // Return the computed style from a certain ID.
-    function getProcessedStyle(reference, cellUnit) {
+    function getProcessedStyle(reference, cellUnit, includeRegionStyles) {
         var styles = [];
         var ids = reference.match(/\S+/g);
         ids.forEach(function (id) {
@@ -795,11 +1015,56 @@ function TTMLParser() {
             if (cueStyle) {
                 // Process the style for the cue in CSS form.
                 // Send a copy of the style object, so it does not modify the original by cleaning it.
-                var stylesFromId = processStyle(JSON.parse(JSON.stringify(cueStyle)), cellUnit);
+                var stylesFromId = processStyle(JSON.parse(JSON.stringify(cueStyle)), cellUnit, includeRegionStyles);
                 styles = styles.concat(stylesFromId);
             }
         });
         return styles;
+    }
+
+    // Calculate relative left, top, width, height from extent and origin in percent.
+    // Return object with {left, top, width, height} as numbers in percent or null.
+    function getRelativePositioning(element, ttExtent) {
+
+        let pairRe = /([\d\.]+)(%|px)\s+([\d\.]+)(%|px)/;
+
+        if (('tts:extent' in element) && ('tts:origin' in element) ) {
+            let extentParts = pairRe.exec(element['tts:extent']);
+            let originParts = pairRe.exec(element['tts:origin']);
+            if (extentParts === null || originParts === null) {
+                log('Bad extent or origin: ' + element['tts:extent'] + ' ' + element['tts:origin']);
+                return null;
+            }
+            let width = parseFloat(extentParts[1]);
+            let height = parseFloat(extentParts[3]);
+            let left = parseFloat(originParts[1]);
+            let top = parseFloat(originParts[3]);
+
+            if (ttExtent) { // Should give overall scale in pixels
+                let ttExtentParts = pairRe.exec(ttExtent);
+                if (ttExtentParts === null || ttExtentParts[2] !== 'px' || ttExtentParts[4] !== 'px') {
+                    log('Bad tt.extent: ' + ttExtent);
+                    return null;
+                }
+                let exWidth = parseFloat(ttExtentParts[1]);
+                let exHeight = parseFloat(ttExtentParts[3]);
+                if (extentParts[2] === 'px') {
+                    width = width / exWidth * 100;
+                }
+                if (extentParts[4] === 'px') {
+                    height = height / exHeight * 100;
+                }
+                if (originParts[2] === 'px') {
+                    left = left / exWidth * 100;
+                }
+                if (originParts[4] === 'px') {
+                    top = top / exHeight * 100;
+                }
+            }
+            return { 'left': left, 'top': top, 'width': width, 'height': height };
+        } else {
+            return null;
+        }
     }
 
     /**
@@ -848,7 +1113,7 @@ function TTMLParser() {
         }
         // Style will give to the region the style properties from the style selected
         if ('style' in cueRegion) {
-            var styleFromID = getProcessedStyle(cueRegion.style, cellUnit);
+            var styleFromID = getProcessedStyle(cueRegion.style, cellUnit, true);
             properties = properties.concat(styleFromID);
         }
 
@@ -940,7 +1205,7 @@ function TTMLParser() {
         // Strings for the cue innerHTML construction.
         var spanStringEnd = '<\/span>';
         var br = '<br>';
-        var clonePropertyString = '<span' + ' class="spanPadding" ' + 'style="-webkit-box-decoration-break: clone; ';
+        var clonePropertyString = '<span' + ' class="spanPadding" ' + 'style="-webkit-box-decoration-break: clone; box-decoration-break: clone; ';
 
         // If br elements are found:
         if (indices.length) {
@@ -1001,12 +1266,13 @@ function TTMLParser() {
         return cueInnerHTML;
     }
 
-    /*** Create the cue element
+    /*
+    * Create the cue element
      * I. The cues are text only:
      *      i) The cue contains a 'br' element
      *      ii) The cue contains a span element
      *      iii) The cue contains text
-     * ***/
+     */
 
     function constructCue(cueElements, cellUnit) {
         var cue = document.createElement('div');

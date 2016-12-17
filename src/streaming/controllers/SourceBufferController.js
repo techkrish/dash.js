@@ -28,19 +28,19 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import TextSourceBuffer from '../TextSourceBuffer.js';
-import MediaController from './MediaController.js';
-import DashAdapter from '../../dash/DashAdapter.js';
-import ErrorHandler from '../utils/ErrorHandler.js';
-import StreamController from './StreamController.js';
-import TextTracks from '../TextTracks.js';
-import VTTParser from '../utils/VTTParser.js';
-import TTMLParser from '../utils/TTMLParser.js';
-import VideoModel from '../models/VideoModel.js';
-import Error from '../vo/Error.js';
-import EventBus from '../../core/EventBus.js';
-import Events from '../../core/events/Events.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
+import TextSourceBuffer from '../TextSourceBuffer';
+import MediaController from './MediaController';
+import DashAdapter from '../../dash/DashAdapter';
+import ErrorHandler from '../utils/ErrorHandler';
+import StreamController from './StreamController';
+import TextTracks from '../TextTracks';
+import VTTParser from '../utils/VTTParser';
+import TTMLParser from '../utils/TTMLParser';
+import VideoModel from '../models/VideoModel';
+import Error from '../vo/Error';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
+import FactoryMaker from '../../core/FactoryMaker';
 
 
 const QUOTA_EXCEEDED_ERROR_CODE = 22;
@@ -63,14 +63,15 @@ function SourceBufferController() {
             // it definitely doesn't understand 'application/mp4;codecs="stpp"'
             // - currently no browser does, so check for it and use our own
             // implementation. The same is true for codecs="wvtt".
-            if (codec.match(/application\/mp4;\s*codecs="(stpp|wvtt)"/i)) {
+            if (codec.match(/application\/mp4;\s*codecs="(stpp|wvtt).*"/i)) {
                 throw new Error('not really supported');
             }
 
             buffer = mediaSource.addSourceBuffer(codec);
 
         } catch (ex) {
-            if ((mediaInfo.isText) || (codec.indexOf('codecs="stpp"') !== -1) ||  (codec.indexOf('codecs="wvtt"') !== -1) ) {
+            // Note that in the following, the quotes are open to allow for extra text after stpp and wvtt
+            if ((mediaInfo.isText) || (codec.indexOf('codecs="stpp') !== -1) ||  (codec.indexOf('codecs="wvtt') !== -1) ) {
                 buffer = TextSourceBuffer(context).getInstance();
                 buffer.setConfig({
                     errHandler: ErrorHandler(context).getInstance(),
@@ -319,6 +320,8 @@ function SourceBufferController() {
         try {
             if (mediaSource.readyState === 'open') {
                 buffer.abort();
+            } else if (buffer.setTextTrack && mediaSource.readyState === 'ended') {
+                buffer.abort(); //The cues need to be removed from the TextSourceBuffer via a call to abort()
             }
         } catch (ex) {
         }

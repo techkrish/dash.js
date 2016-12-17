@@ -29,8 +29,8 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
-import IsoBox from '../vo/IsoBox.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
+import IsoBox from '../vo/IsoBox';
+import FactoryMaker from '../../core/FactoryMaker';
 
 function IsoFile() {
 
@@ -42,6 +42,7 @@ function IsoFile() {
         emsgProps,
         mdhdProps,
         mfhdProps,
+        subsProps,
         tfhdProps,
         tfdtProps,
         trunProps,
@@ -49,7 +50,7 @@ function IsoFile() {
 
     /**
     * @param {string} type
-    * @returns {@link IsoBox}
+    * @returns {IsoBox|null}
     * @memberof IsoFile#
     */
     function getBox(type) {
@@ -88,7 +89,7 @@ function IsoFile() {
     }
 
     /**
-    * @returns {@link IsoBox}
+    * @returns {IsoBox|null}
     * @memberof IsoFile#
     */
     function getLastBox() {
@@ -101,7 +102,7 @@ function IsoFile() {
     }
 
     /**
-    * @returns {Number}
+    * @returns {number}
     * @memberof IsoFile#
     */
     function getOffset() {
@@ -144,6 +145,10 @@ function IsoFile() {
 
         mfhdProps = {
             sequence_number: 'sequence_number'
+        };
+
+        subsProps = {
+            samples_with_subsamples: 'samples_with_subsamples'
         };
 
         tfhdProps = {
@@ -212,6 +217,9 @@ function IsoFile() {
                 break;
             case 'mfhd':
                 copyProps(boxData, box, mfhdProps);
+                break;
+            case 'subs':
+                copyProps(boxData, box, subsProps);
                 break;
             case 'tfhd':
                 copyProps(boxData, box, tfhdProps);

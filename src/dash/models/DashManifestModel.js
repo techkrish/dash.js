@@ -29,21 +29,29 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
-import Representation from '../vo/Representation.js';
-import AdaptationSet from '../vo/AdaptationSet.js';
-import Period from '../vo/Period.js';
-import Mpd from '../vo/Mpd.js';
-import UTCTiming from '../vo/UTCTiming.js';
-import TimelineConverter from '../utils/TimelineConverter.js';
-import Event from '../vo/Event.js';
-import EventStream from '../vo/EventStream.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
+import Representation from '../vo/Representation';
+import AdaptationSet from '../vo/AdaptationSet';
+import Period from '../vo/Period';
+import Mpd from '../vo/Mpd';
+import UTCTiming from '../vo/UTCTiming';
+import TimelineConverter from '../utils/TimelineConverter';
+import MediaController from '../../streaming/controllers/MediaController';
+import DashAdapter from '../DashAdapter';
+import Event from '../vo/Event';
+import BaseURL from '../vo/BaseURL';
+import EventStream from '../vo/EventStream';
+import URLUtils from '../../streaming/utils/URLUtils';
+import FactoryMaker from '../../core/FactoryMaker';
 
 function DashManifestModel() {
 
     let instance;
     let context = this.context;
     let timelineConverter = TimelineConverter(context).getInstance();//TODO Need to pass this in not bake in
+    let mediaController = MediaController(context).getInstance();
+    let adaptor = DashAdapter(context).getInstance();
+
+    const urlUtils = URLUtils(context).getInstance();
 
     function getIsTypeOf(adaptation, type) {
 
@@ -58,15 +66,16 @@ function DashManifestModel() {
 
         if ((adaptation.Representation_asArray.length > 0) &&
             (adaptation.Representation_asArray[0].hasOwnProperty('codecs'))) {
+            // Just check the start of the codecs string
             var codecs = adaptation.Representation_asArray[0].codecs;
-            if (codecs === 'stpp' || codecs === 'wvtt') {
+            if (codecs.search('stpp') === 0 || codecs.search('wvtt') === 0) {
                 return type === 'fragmentedText';
             }
         }
 
         if (col) {
             if (col.length > 1) {
-                return (type == 'muxed');
+                return (type === 'muxed');
             } else if (col[0] && col[0].contentType === type) {
                 result = true;
                 found = true;
@@ -154,11 +163,13 @@ function DashManifestModel() {
         })[0];
     }
 
+    function getRepresentationSortFunction() {
+        return (a, b) => a.bandwidth - b.bandwidth;
+    }
+
     function processAdaptation(adaptation) {
         if (adaptation.Representation_asArray !== undefined && adaptation.Representation_asArray !== null) {
-            adaptation.Representation_asArray.sort(function (a, b) {
-                return a.bandwidth - b.bandwidth;
-            });
+            adaptation.Representation_asArray.sort(getRepresentationSortFunction());
         }
 
         return adaptation;
@@ -215,17 +226,23 @@ function DashManifestModel() {
         return adaptations;
     }
 
-    function getAdaptationForType(manifest, periodIndex, type) {
-        var i,
-            len,
-            adaptations;
+    function getAdaptationForType(manifest, periodIndex, type, streamInfo) {
 
-        adaptations = getAdaptationsForType(manifest, periodIndex, type);
+        let adaptations = getAdaptationsForType(manifest, periodIndex, type);
 
         if (!adaptations || adaptations.length === 0) return null;
 
-        for (i = 0, len = adaptations.length; i < len; i++) {
-            if (getIsMain(adaptations[i])) return adaptations[i];
+        if (adaptations.length > 1 && streamInfo) {
+            let currentTrack = mediaController.getCurrentTrackFor(type, streamInfo);
+            let allMediaInfoForType = adaptor.getAllMediaInfoForType(manifest, streamInfo, type);
+            for (let i = 0, ln = adaptations.length; i < ln; i++) {
+                if (currentTrack && mediaController.isTracksEqual(currentTrack, allMediaInfoForType[i])) {
+                    return adaptations[i];
+                }
+                if (getIsMain(adaptations[i])) {
+                    return adaptations[i];
+                }
+            }
         }
 
         return adaptations[0];
@@ -273,14 +290,22 @@ function DashManifestModel() {
         return isDVR;
     }
 
-    function getIsOnDemand(manifest) {
-        var isOnDemand = false;
+    function hasProfile(manifest, profile) {
+        var has = false;
 
         if (manifest.profiles && manifest.profiles.length > 0) {
-            isOnDemand = (manifest.profiles.indexOf('urn:mpeg:dash:profile:isoff-on-demand:2011') !== -1);
+            has = (manifest.profiles.indexOf(profile) !== -1);
         }
 
-        return isOnDemand;
+        return has;
+    }
+
+    function getIsOnDemand(manifest) {
+        return hasProfile(manifest, 'urn:mpeg:dash:profile:isoff-on-demand:2011');
+    }
+
+    function getIsDVB(manifest) {
+        return hasProfile(manifest, 'urn:dvb:dash:profile:dvb-dash:2014');
     }
 
     function getDuration(manifest) {
@@ -300,15 +325,12 @@ function DashManifestModel() {
         return representation.bandwidth;
     }
 
-    function getRefreshDelay(manifest) {
-        var delay = NaN;
-        var minDelay = 2;
-
+    function getManifestUpdatePeriod(manifest, latencyOfLastUpdate = 0) {
+        let delay = NaN;
         if (manifest.hasOwnProperty('minimumUpdatePeriod')) {
-            delay = Math.max(parseFloat(manifest.minimumUpdatePeriod), minDelay);
+            delay = manifest.minimumUpdatePeriod;
         }
-
-        return delay;
+        return isNaN(delay) ? delay : Math.max(delay - latencyOfLastUpdate, 1);
     }
 
     function getRepresentationCount(adaptation) {
@@ -369,8 +391,17 @@ function DashManifestModel() {
             }
             else if (r.hasOwnProperty('SegmentList')) {
                 segmentInfo = r.SegmentList;
-                representation.segmentInfoType = 'SegmentList';
-                representation.useCalculatedLiveEdgeTime = true;
+
+                if (segmentInfo.hasOwnProperty('SegmentTimeline')) {
+                    representation.segmentInfoType = 'SegmentTimeline';
+                    s = segmentInfo.SegmentTimeline.S_asArray[segmentInfo.SegmentTimeline.S_asArray.length - 1];
+                    if (!s.hasOwnProperty('r') || s.r >= 0) {
+                        representation.useCalculatedLiveEdgeTime = true;
+                    }
+                } else {
+                    representation.segmentInfoType = 'SegmentList';
+                    representation.useCalculatedLiveEdgeTime = true;
+                }
             }
             else if (r.hasOwnProperty('SegmentTemplate')) {
                 segmentInfo = r.SegmentTemplate;
@@ -399,11 +430,10 @@ function DashManifestModel() {
                 if (initialization.hasOwnProperty('sourceURL')) {
                     representation.initialization = initialization.sourceURL;
                 } else if (initialization.hasOwnProperty('range')) {
-                    representation.initialization = r.BaseURL;
                     representation.range = initialization.range;
+                    representation.initialization = r.BaseURL;
                 }
             } else if (r.hasOwnProperty('mimeType') && getIsTextTrack(r.mimeType)) {
-                representation.initialization = r.BaseURL;
                 representation.range = 0;
             }
 
@@ -429,6 +459,9 @@ function DashManifestModel() {
             }
 
             representation.MSETimeOffset = timelineConverter.calcMSETimeOffset(representation);
+
+            representation.path = [adaptation.period.index, adaptation.index, i];
+
             representations.push(representation);
         }
 
@@ -518,7 +551,7 @@ function DashManifestModel() {
             }
 
             if (vo !== null) {
-                vo.id = getPeriodId(p);
+                vo.id = getPeriodId(p, i);
             }
 
             if (vo !== null && p.hasOwnProperty('duration')) {
@@ -551,12 +584,12 @@ function DashManifestModel() {
         return periods;
     }
 
-    function getPeriodId(p) {
+    function getPeriodId(p, i) {
         if (!p) {
             throw new Error('Period cannot be null or undefined');
         }
 
-        var id = Period.DEFAULT_ID;
+        let id = Period.DEFAULT_ID + '_' + i;
 
         if (p.hasOwnProperty('id') && p.id !== '__proto__') {
             id = p.id;
@@ -580,6 +613,14 @@ function DashManifestModel() {
             mpd.availabilityEndTime = new Date(manifest.availabilityEndTime.getTime());
         }
 
+        if (manifest.hasOwnProperty('minimumUpdatePeriod')) {
+            mpd.minimumUpdatePeriod = manifest.minimumUpdatePeriod;
+        }
+
+        if (manifest.hasOwnProperty('mediaPresentationDuration')) {
+            mpd.mediaPresentationDuration = manifest.mediaPresentationDuration;
+        }
+
         if (manifest.hasOwnProperty('suggestedPresentationDelay')) {
             mpd.suggestedPresentationDelay = manifest.suggestedPresentationDelay;
         }
@@ -595,46 +636,19 @@ function DashManifestModel() {
         return mpd;
     }
 
-    function getFetchTime(manifest, period) {
-        // FetchTime is defined as the time at which the server processes the request for the MPD from the client.
-        // TODO The client typically should not use the time at which it actually successfully received the MPD, but should
-        // take into account delay due to MPD delivery and processing. The fetch is considered successful fetching
-        // either if the client obtains an updated MPD or the client verifies that the MPD has not been updated since the previous fetching.
-
-        return timelineConverter.calcPresentationTimeFromWallTime(manifest.loadedTime, period);
-    }
-
-    function getCheckTime(manifest, period) {
-        var checkTime = NaN;
-        var fetchTime;
-
-        // If the MPD@minimumUpdatePeriod attribute in the client is provided, then the check time is defined as the
-        // sum of the fetch time of this operating MPD and the value of this attribute,
-        // i.e. CheckTime = FetchTime + MPD@minimumUpdatePeriod.
-        if (manifest.hasOwnProperty('minimumUpdatePeriod')) {
-            fetchTime = getFetchTime(manifest, period);
-            checkTime = fetchTime + manifest.minimumUpdatePeriod;
-        }
-        // TODO If the MPD@minimumUpdatePeriod attribute in the client is not provided, external means are used to
-        // determine CheckTime, such as a priori knowledge, or HTTP cache headers, etc.
-
-        return checkTime;
-    }
 
     function getEndTimeForLastPeriod(manifest, period) {
-        var periodEnd;
-        var checkTime = getCheckTime(manifest, period);
+        const isDynamic = getIsDynamic(manifest);
 
-        // if the MPD@mediaPresentationDuration attribute is present, then PeriodEndTime is defined as the end time of the Media Presentation.
-        // if the MPD@mediaPresentationDuration attribute is not present, then PeriodEndTime is defined as FetchTime + MPD@minimumUpdatePeriod
-
+        let periodEnd;
         if (manifest.mediaPresentationDuration) {
             periodEnd = manifest.mediaPresentationDuration;
-        } else if (!isNaN(checkTime)) {
-            // in this case the Period End Time should match CheckTime
-            periodEnd = checkTime;
+        } else if (period.duration) {
+            periodEnd = period.duration;
+        } else if (isDynamic) {
+            periodEnd = Number.POSITIVE_INFINITY;
         } else {
-            throw new Error('Must have @mediaPresentationDuration or @minimumUpdatePeriod on MPD or an explicit @duration on the last period.');
+            throw new Error('Must have @mediaPresentationDuratio on MPD or an explicit @duration on the last period.');
         }
 
         return periodEnd;
@@ -655,7 +669,7 @@ function DashManifestModel() {
                 if (eventStreams[i].hasOwnProperty('schemeIdUri')) {
                     eventStream.schemeIdUri = eventStreams[i].schemeIdUri;
                 } else {
-                    throw 'Invalid EventStream. SchemeIdUri has to be set';
+                    throw new Error('Invalid EventStream. SchemeIdUri has to be set');
                 }
                 if (eventStreams[i].hasOwnProperty('timescale')) {
                     eventStream.timescale = eventStreams[i].timescale;
@@ -698,7 +712,7 @@ function DashManifestModel() {
             if (inbandStreams[i].hasOwnProperty('schemeIdUri')) {
                 eventStream.schemeIdUri = inbandStreams[i].schemeIdUri;
             } else {
-                throw 'Invalid EventStream. SchemeIdUri has to be set';
+                throw new Error('Invalid EventStream. SchemeIdUri has to be set');
             }
             if (inbandStreams[i].hasOwnProperty('timescale')) {
                 eventStream.timescale = inbandStreams[i].timescale;
@@ -773,6 +787,80 @@ function DashManifestModel() {
         return utcTimingEntries;
     }
 
+    function getBaseURLsFromElement(node) {
+        let baseUrls = [];
+        // if node.BaseURL_asArray and node.baseUri are undefined entries
+        // will be [undefined] which entries.some will just skip
+        let entries = node.BaseURL_asArray || [node.baseUri];
+        let earlyReturn = false;
+
+        entries.some(entry => {
+            if (entry) {
+                const baseUrl = new BaseURL();
+                let text = entry.__text || entry;
+
+                if (urlUtils.isRelative(text)) {
+                    // it doesn't really make sense to have relative and
+                    // absolute URLs at the same level, or multiple
+                    // relative URLs at the same level, so assume we are
+                    // done from this level of the MPD
+                    earlyReturn = true;
+
+                    // deal with the specific case where the MPD@BaseURL
+                    // is specified and is relative. when no MPD@BaseURL
+                    // entries exist, that case is handled by the
+                    // [node.baseUri] in the entries definition.
+                    if (node.baseUri) {
+                        text = node.baseUri + text;
+                    }
+                }
+
+                baseUrl.url = text;
+
+                // serviceLocation is optional, but we need it in order
+                // to blacklist correctly. if it's not available, use
+                // anything unique since there's no relationship to any
+                // other BaseURL and, in theory, the url should be
+                // unique so use this instead.
+                if (entry.hasOwnProperty('serviceLocation') &&
+                        entry.serviceLocation.length) {
+                    baseUrl.serviceLocation = entry.serviceLocation;
+                } else {
+                    baseUrl.serviceLocation = text;
+                }
+
+                if (entry.hasOwnProperty('dvb:priority')) {
+                    baseUrl.dvb_priority = entry['dvb:priority'];
+                }
+
+                if (entry.hasOwnProperty('dvb:weight')) {
+                    baseUrl.dvb_weight = entry['dvb:weight'];
+                }
+
+                /* NOTE: byteRange, availabilityTimeOffset,
+                 * availabilityTimeComplete currently unused
+                 */
+
+                baseUrls.push(baseUrl);
+
+                return earlyReturn;
+            }
+        });
+
+        return baseUrls;
+    }
+
+    function getLocation(manifest) {
+        if (manifest.hasOwnProperty('Location')) {
+            // for now, do not support multiple Locations -
+            // just set Location to the first Location.
+            manifest.Location = manifest.Location_asArray[0];
+        }
+
+        // may well be undefined
+        return manifest.Location;
+    }
+
     instance = {
         getIsTypeOf: getIsTypeOf,
         getIsAudio: getIsAudio,
@@ -800,25 +888,25 @@ function DashManifestModel() {
         getIsDynamic: getIsDynamic,
         getIsDVR: getIsDVR,
         getIsOnDemand: getIsOnDemand,
+        getIsDVB: getIsDVB,
         getDuration: getDuration,
         getBandwidth: getBandwidth,
-        getRefreshDelay: getRefreshDelay,
+        getManifestUpdatePeriod: getManifestUpdatePeriod,
         getRepresentationCount: getRepresentationCount,
         getBitrateListForAdaptation: getBitrateListForAdaptation,
         getRepresentationFor: getRepresentationFor,
         getRepresentationsForAdaptation: getRepresentationsForAdaptation,
         getAdaptationsForPeriod: getAdaptationsForPeriod,
         getRegularPeriods: getRegularPeriods,
-        getPeriodId: getPeriodId,
         getMpd: getMpd,
-        getFetchTime: getFetchTime,
-        getCheckTime: getCheckTime,
-        getEndTimeForLastPeriod: getEndTimeForLastPeriod,
         getEventsForPeriod: getEventsForPeriod,
         getEventStreams: getEventStreams,
         getEventStreamForAdaptationSet: getEventStreamForAdaptationSet,
         getEventStreamForRepresentation: getEventStreamForRepresentation,
-        getUTCTimingSources: getUTCTimingSources
+        getUTCTimingSources: getUTCTimingSources,
+        getBaseURLsFromElement: getBaseURLsFromElement,
+        getRepresentationSortFunction: getRepresentationSortFunction,
+        getLocation: getLocation
     };
 
     return instance;

@@ -28,16 +28,17 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import FragmentRequest from '../streaming/vo/FragmentRequest.js';
-import Error from '../streaming/vo/Error.js';
-import HTTPRequest from '../streaming/vo/metrics/HTTPRequest.js';
-import Events from '../core/events/Events.js';
-import EventBus from '../core/EventBus.js';
-import FactoryMaker from '../core/FactoryMaker.js';
-import Debug from '../core/Debug.js';
+import FragmentRequest from '../streaming/vo/FragmentRequest';
+import Error from '../streaming/vo/Error';
+import {HTTPRequest} from '../streaming/vo/metrics/HTTPRequest';
+import Events from '../core/events/Events';
+import EventBus from '../core/EventBus';
+import FactoryMaker from '../core/FactoryMaker';
+import Debug from '../core/Debug';
+import URLUtils from '../streaming/utils/URLUtils';
 
-import {replaceTokenForTemplate, getTimeBasedSegment, getSegmentByIndex} from './utils/SegmentsUtils.js';
-import SegmentsGetter from './utils/SegmentsGetter.js';
+import {replaceTokenForTemplate, getTimeBasedSegment, getSegmentByIndex} from './utils/SegmentsUtils';
+import SegmentsGetter from './utils/SegmentsGetter';
 
 const SEGMENTS_UNAVAILABLE_ERROR_CODE = 1;
 
@@ -46,11 +47,13 @@ function DashHandler(config) {
     let context = this.context;
     let log = Debug(context).getInstance().log;
     let eventBus = EventBus(context).getInstance();
+    const urlUtils = URLUtils(context).getInstance();
 
     let segmentBaseLoader = config.segmentBaseLoader;
     let timelineConverter = config.timelineConverter;
     let dashMetrics = config.dashMetrics;
     let metricsModel = config.metricsModel;
+    const baseURLController = config.baseURLController;
 
     let instance,
         index,
@@ -58,17 +61,14 @@ function DashHandler(config) {
         isDynamic,
         type,
         currentTime,
-        absUrl,
+        earliestTime,
         streamProcessor,
-        initialSegmentList,
         segmentsGetter;
 
     function setup() {
         index = -1;
         currentTime = 0;
-        initialSegmentList = null;
-        absUrl = new RegExp('^(?:(?:[a-z]+:)?\/)?\/', 'i');
-
+        earliestTime = NaN;
         eventBus.on(Events.INITIALIZATION_LOADED, onInitializationLoaded, instance);
         eventBus.on(Events.SEGMENTS_LOADED, onSegmentsLoaded, instance);
     }
@@ -97,14 +97,14 @@ function DashHandler(config) {
         return index;
     }
 
-    function getInitialSegmentList() {
-        return initialSegmentList;
+    function getEarliestTime() {
+        return earliestTime;
     }
 
     function reset() {
         segmentsGetter = null;
         currentTime = 0;
-        initialSegmentList = null;
+        earliestTime = NaN;
         requestedTime = NaN;
         index = -1;
         isDynamic = null;
@@ -124,76 +124,71 @@ function DashHandler(config) {
         return url.split('$RepresentationID$').join(v);
     }
 
-    function getRequestUrl(destination, representation) {
-        var baseURL = representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].
-            AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].BaseURL;
+    function setRequestUrl(request, destination, representation) {
+        var baseURL = baseURLController.resolve(representation.path);
         var url;
+        var serviceLocation;
 
-        if (destination === baseURL) {
-            url = destination;
-        } else if (absUrl.test(destination)) {
+        if (!baseURL || (destination === baseURL.url) || (!urlUtils.isRelative(destination))) {
             url = destination;
         } else {
-            url = baseURL + destination;
+            url = baseURL.url;
+            serviceLocation = baseURL.serviceLocation;
+
+            if (destination) {
+                url = urlUtils.resolve(destination, url);
+            }
         }
 
-        return url;
+        if (urlUtils.isRelative(url)) {
+            return false;
+        }
+
+        request.url = url;
+        request.serviceLocation = serviceLocation;
+
+        return true;
     }
 
     function generateInitRequest(representation, mediaType) {
-        var request = new FragmentRequest();
-        var period,
-            presentationStartTime;
 
-        period = representation.adaptation.period;
+        const request = new FragmentRequest();
+        const period = representation.adaptation.period;
+        const presentationStartTime = period.start;
 
         request.mediaType = mediaType;
         request.type = HTTPRequest.INIT_SEGMENT_TYPE;
-        request.url = getRequestUrl(representation.initialization, representation);
         request.range = representation.range;
-        presentationStartTime = period.start;
-        request.availabilityStartTime = timelineConverter.calcAvailabilityStartTimeFromPresentationTime(presentationStartTime, representation.adaptation.period.mpd, isDynamic);
+        request.availabilityStartTime = timelineConverter.calcAvailabilityStartTimeFromPresentationTime(presentationStartTime, period.mpd, isDynamic);
         request.availabilityEndTime = timelineConverter.calcAvailabilityEndTimeFromPresentationTime(presentationStartTime + period.duration, period.mpd, isDynamic);
         request.quality = representation.index;
         request.mediaInfo = streamProcessor.getMediaInfo();
 
-        return request;
+        if (setRequestUrl(request, representation.initialization, representation)) {
+            return request;
+        }
     }
 
     function getInitRequest(representation) {
-        var request;
-
         if (!representation) return null;
-
-        request = generateInitRequest(representation, type);
-        //log("Got an initialization.");
-
+        const request = generateInitRequest(representation, type);
         return request;
     }
 
     function isMediaFinished(representation) {
-        var period = representation.adaptation.period;
-        var segmentInfoType = representation.segmentInfoType;
 
-        var isFinished = false;
+        let isFinished = false;
 
-        var sDuration,
-            seg,
-            fTime;
-
-        if (index < 0) {
-            isFinished = false;
-        } else if (isDynamic || index < representation.availableSegmentsNumber) {
-            seg = getSegmentByIndex(index, representation);
-
-            if (seg) {
-                fTime = seg.presentationStartTime - period.start;
-                sDuration = representation.adaptation.period.duration;
-                log(representation.segmentInfoType + ': ' + fTime + ' / ' + sDuration);
-                isFinished = segmentInfoType === 'SegmentTimeline' && isDynamic ? false : (fTime >= sDuration);
-            }
-        } else {
+        if (!isDynamic && index === representation.availableSegmentsNumber) {
             isFinished = true;
+        } else {
+            const seg = getSegmentByIndex(index, representation);
+            if (seg) {
+                const time = seg.presentationStartTime - representation.adaptation.period.start;
+                const duration = representation.adaptation.period.duration;
+                log(representation.segmentInfoType + ': ' + time + ' / ' + duration);
+                isFinished = representation.segmentInfoType === 'SegmentTimeline' && isDynamic ? false : time >= duration;
+            }
         }
 
         return isFinished;
@@ -204,22 +199,18 @@ function DashHandler(config) {
     }
 
     function onSegmentListUpdated(representation, segments) {
-        var lastIdx,
-            liveEdge,
-            metrics,
-            lastSegment;
 
         representation.segments = segments;
-        if (!initialSegmentList) {
-            initialSegmentList = segments;
+
+        if (segments && segments.length > 0) {
+            earliestTime = isNaN(earliestTime) ? segments[0].presentationStartTime : Math.min(segments[0].presentationStartTime,  earliestTime);
         }
 
-        lastIdx = segments.length - 1;
         if (isDynamic && isNaN(timelineConverter.getExpectedLiveEdge())) {
-            lastSegment = segments[lastIdx];
-            liveEdge = lastSegment.presentationStartTime;
-            metrics = metricsModel.getMetricsFor('stream');
-            // the last segment is supposed to be a live edge
+            const lastSegment = segments[segments.length - 1];
+            const liveEdge = lastSegment.presentationStartTime;
+            const metrics = metricsModel.getMetricsFor('stream');
+            // the last segment is the Expected, not calculated, live edge.
             timelineConverter.setExpectedLiveEdge(liveEdge);
             metricsModel.updateManifestUpdateInfo(dashMetrics.getCurrentManifestUpdate(metrics), {presentationStartTime: liveEdge});
         }
@@ -240,7 +231,7 @@ function DashHandler(config) {
 
     function updateRepresentation(representation, keepIdx) {
         var hasInitialization = representation.initialization;
-        var hasSegments = representation.segmentInfoType !== 'BaseURL' && representation.segmentInfoType !== 'SegmentBase';
+        var hasSegments = representation.segmentInfoType !== 'BaseURL' && representation.segmentInfoType !== 'SegmentBase' && !representation.indexRange;
         var error;
 
         if (!representation.segmentDuration && !representation.segments) {
@@ -312,9 +303,8 @@ function DashHandler(config) {
         var representation = segment.representation;
         var bandwidth = representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].
             AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].bandwidth;
-        var url;
+        var url = segment.media;
 
-        url = getRequestUrl(segment.media, representation);
         url = replaceTokenForTemplate(url, 'Number', segment.replacementNumber);
         url = replaceTokenForTemplate(url, 'Time', segment.replacementTime);
         url = replaceTokenForTemplate(url, 'Bandwidth', bandwidth);
@@ -323,7 +313,6 @@ function DashHandler(config) {
 
         request.mediaType = type;
         request.type = HTTPRequest.MEDIA_SEGMENT_TYPE;
-        request.url = url;
         request.range = segment.mediaRange;
         request.startTime = segment.presentationStartTime;
         request.duration = segment.duration;
@@ -336,7 +325,9 @@ function DashHandler(config) {
         request.mediaInfo = streamProcessor.getMediaInfo();
         request.adaptationIndex = representation.adaptation.index;
 
-        return request;
+        if (setRequestUrl(request, url, representation)) {
+            return request;
+        }
     }
 
     function getSegmentRequestForTime(representation, time, options) {
@@ -500,7 +491,7 @@ function DashHandler(config) {
         setCurrentTime: setCurrentTime,
         getCurrentTime: getCurrentTime,
         getCurrentIndex: getCurrentIndex,
-        getInitialSegmentList: getInitialSegmentList,
+        getEarliestTime: getEarliestTime,
         reset: reset
     };
 

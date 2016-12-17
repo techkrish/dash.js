@@ -28,11 +28,12 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import XlinkLoader from '../XlinkLoader.js';
-import EventBus from '../../core/EventBus.js';
-import Events from '../../core/events/Events.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
-import X2JS from '../../../externals/xml2json.js';
+import XlinkLoader from '../XlinkLoader';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
+import FactoryMaker from '../../core/FactoryMaker';
+import X2JS from '../../../externals/xml2json';
+import URLUtils from '../utils/URLUtils';
 
 const RESOLVE_TYPE_ONLOAD = 'onLoad';
 const RESOLVE_TYPE_ONACTUATE = 'onActuate';
@@ -45,6 +46,7 @@ function XlinkController(config) {
 
     let context = this.context;
     let eventBus = EventBus(context).getInstance();
+    const urlUtils = URLUtils(context).getInstance();
 
     let instance,
         matchers,
@@ -73,12 +75,22 @@ function XlinkController(config) {
 
     /**
      * <p>Triggers the resolution of the xlink.onLoad attributes in the manifest file </p>
-     * @param manifest
+     * @param {Object} mpd - the manifest
      */
     function resolveManifestOnLoad(mpd) {
         var elements;
         // First resolve all periods, so unnecessary requests inside onLoad Periods with Default content are avoided
-        converter = new X2JS(matchers, '', true);
+        converter = new X2JS({
+            escapeMode:         false,
+            attributePrefix:    '',
+            arrayAccessForm:    'property',
+            emptyNodeForm:      'object',
+            stripWhitespaces:   false,
+            enableToStringFunc: false,
+            ignoreRoot:         true,
+            matchers:           matchers
+        });
+
         manifest = mpd;
         elements = getElementsToResolve(manifest.Period_asArray, manifest, ELEMENT_TYPE_PERIOD, RESOLVE_TYPE_ONLOAD);
         resolve(elements, ELEMENT_TYPE_PERIOD, RESOLVE_TYPE_ONLOAD);
@@ -108,7 +120,7 @@ function XlinkController(config) {
         }
         for (i = 0; i < resolveObject.elements.length; i++) {
             element = resolveObject.elements[i];
-            if (element.url.indexOf('http://') !== -1) {
+            if (urlUtils.isHTTPURL(element.url)) {
                 url = element.url;
             } else {
                 url = element.originalContent.BaseURL + element.url;

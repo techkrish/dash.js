@@ -29,7 +29,7 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
-import FactoryMaker from '../../../core/FactoryMaker.js';
+import FactoryMaker from '../../../core/FactoryMaker';
 
 function MetricSerialiser() {
 
@@ -72,7 +72,7 @@ function MetricSerialiser() {
                         obj.push(isBuiltIn ? v : serialise(v));
                     });
 
-                    value = encodeURIComponent(obj.join(','));
+                    value = obj.map(encodeURIComponent).join(',');
                 } else if (typeof value === 'string') {
                     value = encodeURIComponent(value);
                 } else if (value instanceof Date) {

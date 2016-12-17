@@ -28,9 +28,9 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import EventBus from '../../core/EventBus.js';
-import Events from '../../core/events/Events.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
+import FactoryMaker from '../../core/FactoryMaker';
 
 function TextController(config) {
 
@@ -41,6 +41,7 @@ function TextController(config) {
     let errHandler = config.errHandler;
 
     let instance,
+        isBufferingCompleted,
         initialized,
         mediaSource,
         buffer,
@@ -56,6 +57,7 @@ function TextController(config) {
         type = null;
         streamProcessor = null;
         representationController = null;
+        isBufferingCompleted = false;
 
         eventBus.on(Events.DATA_UPDATE_COMPLETED, onDataUpdateCompleted, this);
         eventBus.on(Events.INIT_FRAGMENT_LOADED, onInitFragmentLoaded, this);
@@ -69,8 +71,8 @@ function TextController(config) {
     }
 
     /**
-     * @param mediaInfo object
-     * @returns SourceBuffer object
+     * @param {MediaInfo }mediaInfo
+     * @returns {Object} SourceBuffer object
      * @memberof BufferController#
      */
     function createBuffer(mediaInfo) {
@@ -127,12 +129,17 @@ function TextController(config) {
         sourceBufferController.append(buffer, e.chunk);
     }
 
+    function getIsBufferingCompleted() {
+        return isBufferingCompleted;
+    }
+
     instance = {
         initialize: initialize,
         createBuffer: createBuffer,
         getBuffer: getBuffer,
         setBuffer: setBuffer,
         getStreamProcessor: getStreamProcessor,
+        getIsBufferingCompleted: getIsBufferingCompleted,
         setMediaSource: setMediaSource,
         reset: reset
     };

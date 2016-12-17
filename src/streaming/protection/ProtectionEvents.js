@@ -28,16 +28,16 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import EventsBase from '../../core/events/EventsBase.js';
+import EventsBase from '../../core/events/EventsBase';
 /**
- * @Class
+ * @class
  *
  */
 class ProtectionEvents extends EventsBase {
     /**
      * @description Public facing external events to be used when including protection package.
      * All public events will be aggregated into the MediaPlayerEvents Class and can be accessed
-     * via MediaPlayer.events
+     * via MediaPlayer.events.  public_ is the prefix that we use to move event names to MediaPlayerEvents.
      */
     constructor () {
         super();

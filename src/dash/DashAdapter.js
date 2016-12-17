@@ -29,31 +29,14 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
-import TrackInfo from '../streaming/vo/TrackInfo.js';
-import MediaInfo from '../streaming/vo/MediaInfo.js';
-import StreamInfo from '../streaming/vo/StreamInfo.js';
-import ManifestInfo from '../streaming/vo/ManifestInfo.js';
-import Event from './vo/Event.js';
-import FactoryMaker from '../core/FactoryMaker.js';
-import cea608parser from '../../externals/cea608-parser.js';
-
-const METRIC_LIST = {
-    //TODO need to refactor all that reference to be able to export like all other const on factory object.
-    TCP_CONNECTION: 'TcpList',
-    HTTP_REQUEST: 'HttpList',
-    TRACK_SWITCH: 'RepSwitchList',
-    BUFFER_LEVEL: 'BufferLevel',
-    BUFFER_STATE: 'BufferState',
-    DVR_INFO: 'DVRInfo',
-    DROPPED_FRAMES: 'DroppedFrames',
-    SCHEDULING_INFO: 'SchedulingInfo',
-    REQUESTS_QUEUE: 'RequestsQueue',
-    MANIFEST_UPDATE: 'ManifestUpdate',
-    MANIFEST_UPDATE_STREAM_INFO: 'ManifestUpdatePeriodInfo',
-    MANIFEST_UPDATE_TRACK_INFO: 'ManifestUpdateRepresentationInfo',
-    PLAY_LIST: 'PlayList',
-    DVB_ERRORS: 'DVBErrors'
-};
+import TrackInfo from '../streaming/vo/TrackInfo';
+import MediaInfo from '../streaming/vo/MediaInfo';
+import StreamInfo from '../streaming/vo/StreamInfo';
+import ManifestInfo from '../streaming/vo/ManifestInfo';
+import Event from './vo/Event';
+import FactoryMaker from '../core/FactoryMaker';
+import cea608parser from '../../externals/cea608-parser';
+import * as METRIC_LIST from './constants/DashMetricsList';
 
 function DashAdapter() {
 
@@ -83,6 +66,7 @@ function DashAdapter() {
     }
 
     function getAdaptationForMediaInfo(mediaInfo) {
+        if (!adaptations) return null;
         return adaptations[mediaInfo.streamInfo.id][mediaInfo.index];
     }
 
@@ -175,15 +159,16 @@ function DashAdapter() {
     }
 
     function convertPeriodToStreamInfo(manifest, period) {
-        var streamInfo = new StreamInfo();
-        var THRESHOLD = 1;
+        let streamInfo = new StreamInfo();
+        const THRESHOLD = 1;
 
         streamInfo.id = period.id;
         streamInfo.index = period.index;
         streamInfo.start = period.start;
         streamInfo.duration = period.duration;
         streamInfo.manifestInfo = convertMpdToManifestInfo(manifest, period.mpd);
-        streamInfo.isLast = (manifest.Period_asArray.length === 1) || (Math.abs((streamInfo.start + streamInfo.duration) - streamInfo.manifestInfo.duration) < THRESHOLD);
+        streamInfo.isLast = manifest.Period_asArray.length === 1 || Math.abs((streamInfo.start + streamInfo.duration) - streamInfo.manifestInfo.duration) < THRESHOLD;
+        streamInfo.isFirst = manifest.Period_asArray.length === 1 || dashManifestModel.getRegularPeriods(manifest, dashManifestModel.getMpd(manifest))[0].id === period.id;
 
         return streamInfo;
     }
@@ -203,14 +188,13 @@ function DashAdapter() {
     }
 
     function getMediaInfoForType(manifest, streamInfo, type) {
-        var periodInfo = getPeriodForStreamInfo(streamInfo);
-        var periodId = periodInfo.id;
-        var data = dashManifestModel.getAdaptationForType(manifest, streamInfo.index, type);
-        var idx;
 
+        let data = dashManifestModel.getAdaptationForType(manifest, streamInfo.index, type, streamInfo);
         if (!data) return null;
 
-        idx = dashManifestModel.getIndexForAdaptation(data, manifest, streamInfo.index);
+        let periodInfo = getPeriodForStreamInfo(streamInfo);
+        let periodId = periodInfo.id;
+        let idx = dashManifestModel.getIndexForAdaptation(data, manifest, streamInfo.index);
 
         adaptations[periodId] = adaptations[periodId] || dashManifestModel.getAdaptationsForPeriod(manifest, periodInfo);
 
@@ -285,20 +269,16 @@ function DashAdapter() {
     }
 
     function getStreamsInfo(manifest) {
-        var streams = [];
-        var mpd,
-            ln,
-            i;
 
         if (!manifest) return null;
 
-        mpd = dashManifestModel.getMpd(manifest);
-        periods = dashManifestModel.getRegularPeriods(manifest, mpd);
-        mpd.checkTime = dashManifestModel.getCheckTime(manifest, periods[0]);
-        adaptations = {};
-        ln = periods.length;
+        const streams = [];
+        const mpd = dashManifestModel.getMpd(manifest);
 
-        for (i = 0; i < ln; i++) {
+        periods = dashManifestModel.getRegularPeriods(manifest, mpd);
+        adaptations = {};
+
+        for (let i = 0, ln = periods.length; i < ln; i++) {
             streams.push(convertPeriodToStreamInfo(manifest, periods[i]));
         }
 
@@ -307,7 +287,6 @@ function DashAdapter() {
 
     function getManifestInfo(manifest) {
         var mpd = dashManifestModel.getMpd(manifest);
-
         return convertMpdToManifestInfo(manifest, mpd);
     }
 

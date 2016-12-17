@@ -3,6 +3,8 @@
 
 Travis CI Status: [![Travis CI Status](http://img.shields.io/travis/Dash-Industry-Forum/dash.js/development.svg?style=flat-square)](https://travis-ci.org/Dash-Industry-Forum/dash.js)
 
+Join the discussion: [![Slack Status](https://dashif-slack.azurewebsites.net/badge.svg)](https://dashif-slack.azurewebsites.net)
+
 ## Overview
 A reference client implementation for the playback of MPEG DASH via JavaScript and [compliant browsers](http://caniuse.com/#feat=mediasource). Learn more about DASH IF Reference Client on our [wiki](https://github.com/Dash-Industry-Forum/dash.js/wiki).
 
@@ -17,14 +19,14 @@ Before you get started, please read the Dash.js v2.0 Migration Document found [h
 
 Full [API Documentation ](http://cdn.dashjs.org/latest/jsdoc/index.html) is available describing all public methods, interfaces, properties, and events.
 
-For help, join our [email list](https://groups.google.com/d/forum/dashjs) and read our [wiki](https://github.com/Dash-Industry-Forum/dash.js/wiki).
+For help, join our [Slack channel](https://dashif-slack.azurewebsites.net), our [email list](https://groups.google.com/d/forum/dashjs) and read our [wiki](https://github.com/Dash-Industry-Forum/dash.js/wiki).
 
 ## Reference players
 The released [pre-built reference players](http://dashif.org/reference/players/javascript/index.html) are publicly accessible if you want direct access without writing any Javascript. 
 
-The [nightly build of the /dev branch reference player](http://dashif.org/reference/players/javascript/nightly/dash.js/samples/dash-if-reference-player/index.html), is pre-release but contains the latest fixes. It is a good place to start if you are debugging playback problems. 
+The [nightly build of the /dev branch reference player](http://mediapm.edgesuite.net/dash/public/nightly/samples/dash-if-reference-player/index.html), is pre-release but contains the latest fixes. It is a good place to start if you are debugging playback problems. 
 
-A nightly build of the latest minified files are also available: [dash.all.min.js](http://dashif.org/reference/players/javascript/nightly/dash.js/dist/dash.all.min.js) and its debug version  [dash.all.debug.js](http://dashif.org/reference/players/javascript/nightly/dash.js/dist/dash.all.debug.js).
+A nightly build of the latest minified files are also available: [dash.all.min.js](http://mediapm.edgesuite.net/dash/public/nightly/dist/dash.all.min.js) and its debug version  [dash.all.debug.js](http://mediapm.edgesuite.net/dash/public/nightly/dist/dash.all.debug.js).
 
 ## Quick Start for Users
 If you just want a DASH player to use and don't need to see the code or commit to this project, then follow the instructions below. If you are a developer and want to work with this code base, then skip down to the "Quick Start for Developers" section.

@@ -28,20 +28,21 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import DashManifestModel from '../models/DashManifestModel.js';
-import DashMetrics from '../DashMetrics.js';
-import TimelineConverter from '../utils/TimelineConverter.js';
-import AbrController from '../../streaming/controllers/AbrController.js';
-import PlaybackController from '../../streaming/controllers/PlaybackController.js';
-import StreamController from '../../streaming/controllers/StreamController.js';
-import ManifestModel from '../../streaming/models/ManifestModel.js';
-import MetricsModel from '../../streaming/models/MetricsModel.js';
-import MediaPlayerModel from '../../streaming/models/MediaPlayerModel.js';
-import DOMStorage from '../../streaming/utils/DOMStorage.js';
-import Error from '../../streaming/vo/Error.js';
-import EventBus from '../../core/EventBus.js';
-import Events from '../../core/events/Events.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
+import DashManifestModel from '../models/DashManifestModel';
+import DashMetrics from '../DashMetrics';
+import TimelineConverter from '../utils/TimelineConverter';
+import AbrController from '../../streaming/controllers/AbrController';
+import PlaybackController from '../../streaming/controllers/PlaybackController';
+import StreamController from '../../streaming/controllers/StreamController';
+import ManifestModel from '../../streaming/models/ManifestModel';
+import MetricsModel from '../../streaming/models/MetricsModel';
+import MediaPlayerModel from '../../streaming/models/MediaPlayerModel';
+import DOMStorage from '../../streaming/utils/DOMStorage';
+import Error from '../../streaming/vo/Error';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
+import MediaPlayerEvents from '../../streaming/MediaPlayerEvents';
+import FactoryMaker from '../../core/FactoryMaker';
 
 function RepresentationController() {
 
@@ -86,11 +87,11 @@ function RepresentationController() {
         dashMetrics = DashMetrics(context).getInstance();
         mediaPlayerModel = MediaPlayerModel(context).getInstance();
 
-        eventBus.on(Events.QUALITY_CHANGED, onQualityChanged, instance);
+        eventBus.on(Events.QUALITY_CHANGE_REQUESTED, onQualityChanged, instance);
         eventBus.on(Events.REPRESENTATION_UPDATED, onRepresentationUpdated, instance);
         eventBus.on(Events.WALLCLOCK_TIME_UPDATED, onWallclockTimeUpdated, instance);
         eventBus.on(Events.BUFFER_LEVEL_UPDATED, onBufferLevelUpdated, instance);
-        eventBus.on(Events.LIVE_EDGE_SEARCH_COMPLETED, onLiveEdgeSearchCompleted, instance);
+
     }
 
     function setConfig(config) {
@@ -127,11 +128,11 @@ function RepresentationController() {
 
     function reset() {
 
-        eventBus.off(Events.QUALITY_CHANGED, onQualityChanged, instance);
+        eventBus.off(Events.QUALITY_CHANGE_REQUESTED, onQualityChanged, instance);
         eventBus.off(Events.REPRESENTATION_UPDATED, onRepresentationUpdated, instance);
         eventBus.off(Events.WALLCLOCK_TIME_UPDATED, onWallclockTimeUpdated, instance);
         eventBus.off(Events.BUFFER_LEVEL_UPDATED, onBufferLevelUpdated, instance);
-        eventBus.off(Events.LIVE_EDGE_SEARCH_COMPLETED, onLiveEdgeSearchCompleted, instance);
+
 
         data = null;
         dataIndex = -1;
@@ -266,7 +267,7 @@ function RepresentationController() {
         };
 
         updating = false;
-        eventBus.trigger(Events.AST_IN_FUTURE, { delay: delay });
+        eventBus.trigger(MediaPlayerEvents.AST_IN_FUTURE, { delay: delay });
         setTimeout(update, delay);
     }
 
@@ -277,19 +278,17 @@ function RepresentationController() {
         var streamMetrics = metricsModel.getMetricsFor('stream');
         var metrics = metricsModel.getMetricsFor(getCurrentRepresentation().adaptation.type);
         var manifestUpdateInfo = dashMetrics.getCurrentManifestUpdate(streamMetrics);
-
-        var repInfo,
-            err,
-            repSwitch;
         var alreadyAdded = false;
-
         var postponeTimePeriod = 0;
+        var repInfo;
+        var err;
+        var repSwitch;
 
-        if (r.adaptation.period.mpd.manifest.type == 'dynamic')
+        if (r.adaptation.period.mpd.manifest.type === 'dynamic')
         {
-            var segmentAvailabilityTimePeriod = r.segmentAvailabilityRange.end - r.segmentAvailabilityRange.start;
+            let segmentAvailabilityTimePeriod = r.segmentAvailabilityRange.end - r.segmentAvailabilityRange.start;
             // We must put things to sleep unless till e.g. the startTime calculation in ScheduleController.onLiveEdgeSearchCompleted fall after the segmentAvailabilityRange.start
-            let liveDelay = mediaPlayerModel.getLiveDelay() || currentRepresentation.segmentDuration * mediaPlayerModel.getLiveDelayFragmentCount();
+            let liveDelay = playbackController.computeLiveDelay(currentRepresentation.segmentDuration, streamProcessor.getStreamInfo().manifestInfo.DVRWindowSize);
             postponeTimePeriod = (liveDelay - segmentAvailabilityTimePeriod) * 1000;
         }
 
@@ -335,25 +334,6 @@ function RepresentationController() {
     function onWallclockTimeUpdated(e) {
         if (e.isDynamic) {
             updateAvailabilityWindow(e.isDynamic);
-        }
-    }
-
-    function onLiveEdgeSearchCompleted(e) {
-        if (e.error) return;
-
-        updateAvailabilityWindow(true);
-        indexHandler.updateRepresentation(currentRepresentation, false);
-
-        // we need to update checkTime after we have found the live edge because its initial value
-        // does not take into account clientServerTimeShift
-        var manifest = manifestModel.getValue();
-        var period = currentRepresentation.adaptation.period;
-        var streamInfo = streamController.getActiveStreamInfo();
-
-        if (streamInfo.isLast) {
-            period.mpd.checkTime = dashManifestModel.getCheckTime(manifest, period);
-            period.duration = dashManifestModel.getEndTimeForLastPeriod(manifestModel.getValue(), period) - period.start;
-            streamInfo.duration = period.duration;
         }
     }
 

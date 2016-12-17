@@ -28,7 +28,7 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import FactoryMaker from '../../core/FactoryMaker.js';
+import FactoryMaker from '../../core/FactoryMaker';
 
 function Capabilities() {
 
@@ -61,11 +61,6 @@ function Capabilities() {
     }
 
     function supportsCodec(element, codec) {
-
-        if (!(element instanceof HTMLMediaElement)) {
-            throw 'element must be of type HTMLMediaElement.';
-        }
-
         var canPlay = element.canPlayType(codec);
         return (canPlay === 'probably' || canPlay === 'maybe');
     }

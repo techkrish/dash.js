@@ -28,13 +28,13 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import BufferController from './BufferController.js';
-import URIQueryAndFragmentModel from '../models/URIQueryAndFragmentModel.js';
-import MediaPlayerModel from '../../streaming/models/MediaPlayerModel.js';
-import EventBus from '../../core/EventBus.js';
-import Events from '../../core/events/Events.js';
-import FactoryMaker from '../../core/FactoryMaker.js';
-import Debug from '../../core/Debug.js';
+import BufferController from './BufferController';
+import URIQueryAndFragmentModel from '../models/URIQueryAndFragmentModel';
+import MediaPlayerModel from '../../streaming/models/MediaPlayerModel';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
+import FactoryMaker from '../../core/FactoryMaker';
+import Debug from '../../core/Debug';
 
 function PlaybackController() {
 
@@ -59,7 +59,6 @@ function PlaybackController() {
         streamInfo,
         isDynamic,
         mediaPlayerModel,
-        initialSeekCompleted,
         playOnceInitialized;
 
     function setup() {
@@ -67,7 +66,6 @@ function PlaybackController() {
         liveStartTime = NaN;
         wallclockTimeIntervalId = null;
         isDynamic = null;
-        initialSeekCompleted = false;
         playOnceInitialized = false;
         commonEarliestTime = {};
         mediaPlayerModel = MediaPlayerModel(context).getInstance();
@@ -79,11 +77,10 @@ function PlaybackController() {
         addAllListeners();
         isDynamic = streamInfo.manifestInfo.isDynamic;
         liveStartTime = streamInfo.start;
-
         eventBus.on(Events.DATA_UPDATE_COMPLETED, onDataUpdateCompleted, this);
-        eventBus.on(Events.LIVE_EDGE_SEARCH_COMPLETED, onLiveEdgeSearchCompleted, this);
         eventBus.on(Events.BYTES_APPENDED, onBytesAppended, this);
         eventBus.on(Events.BUFFER_LEVEL_STATE_CHANGED, onBufferLevelStateChanged, this);
+        eventBus.on(Events.PERIOD_SWITCH_STARTED, onPeriodSwitchStarted, this);
 
         if (playOnceInitialized) {
             playOnceInitialized = false;
@@ -91,8 +88,16 @@ function PlaybackController() {
         }
     }
 
+    function onPeriodSwitchStarted(e) {
+        if (!isDynamic && e.fromStreamInfo && commonEarliestTime[e.fromStreamInfo.id]) {
+            delete commonEarliestTime[e.fromStreamInfo.id];
+        }
+    }
+
     function getTimeToStreamEnd() {
-        return ((getStreamStartTime(streamInfo, true) + streamInfo.duration) - getTime());
+        const startTime = getStreamStartTime(true);
+        const offset = isDynamic ? startTime - streamInfo.start : 0;
+        return startTime + (streamInfo.duration - offset) - getTime();
     }
 
     function isPlaybackStarted() {
@@ -103,14 +108,18 @@ function PlaybackController() {
         return streamInfo.id;
     }
 
-    function getStreamDuration() {
-        return streamInfo.duration;
-    }
-
     function play() {
         if (element) {
             element.autoplay = true;
-            element.play();
+            const p = element.play();
+            if (p && (typeof Promise !== 'undefined') && (p instanceof Promise)) {
+                p.catch((e) => {
+                    if (e.name === 'NotAllowedError') {
+                        eventBus.trigger(Events.PLAYBACK_NOT_ALLOWED);
+                    }
+                    log(`Caught pending play exception - continuing (${e})`);
+                });
+            }
         } else {
             playOnceInitialized = true;
         }
@@ -172,9 +181,11 @@ function PlaybackController() {
 
     /**
      * Computes the desirable delay for the live edge to avoid a risk of getting 404 when playing at the bleeding edge
-     * @returns {Number} object
+     * @param {number} fragmentDuration - seconds?
+     * @param {number} dvrWindowSize - seconds?
+     * @returns {number} object
      * @memberof PlaybackController#
-     * */
+     */
     function computeLiveDelay(fragmentDuration, dvrWindowSize) {
         var mpd = dashManifestModel.getMpd(manifestModel.getValue());
 
@@ -203,8 +214,7 @@ function PlaybackController() {
         if (videoModel && element) {
             eventBus.off(Events.DATA_UPDATE_COMPLETED, onDataUpdateCompleted, this);
             eventBus.off(Events.BUFFER_LEVEL_STATE_CHANGED, onBufferLevelStateChanged, this);
-            eventBus.off(Events.LIVE_EDGE_SEARCH_COMPLETED, onLiveEdgeSearchCompleted, this);
-            //eventBus.off(Events.BYTES_APPENDED, onBytesAppended, this);
+            eventBus.off(Events.BYTES_APPENDED, onBytesAppended, this);
             stopUpdatingWallclockTime();
             removeAllListeners();
         }
@@ -245,13 +255,20 @@ function PlaybackController() {
     }
 
     /**
-     * @param streamInfo object
-     * @returns {Number} object
+     * @param {boolean} ignoreStartOffset - ignore URL fragment start offset if true
+     * @returns {number} object
      * @memberof PlaybackController#
      */
-    function getStreamStartTime(streamInfo, ignoreStartOffset) {
+    function getStreamStartTime(ignoreStartOffset) {
         let presentationStartTime;
-        let startTimeOffset = !ignoreStartOffset ? parseInt(URIQueryAndFragmentModel(context).getInstance().getURIFragmentData().s, 10) : NaN;
+        let fragData = URIQueryAndFragmentModel(context).getInstance().getURIFragmentData();
+        let fragS = parseInt(fragData.s, 10);
+        let fragT = parseInt(fragData.t, 10);
+        let startTimeOffset = NaN;
+
+        if (!ignoreStartOffset) {
+            startTimeOffset = !isNaN(fragS) ? fragS : fragT;
+        }
 
         if (isDynamic) {
             if (!isNaN(startTimeOffset) && startTimeOffset > 1262304000) {
@@ -260,7 +277,6 @@ function PlaybackController() {
 
                 if (presentationStartTime > liveStartTime ||
                     presentationStartTime < (liveStartTime - streamInfo.manifestInfo.DVRWindowSize)) {
-
                     presentationStartTime = null;
                 }
             }
@@ -270,7 +286,10 @@ function PlaybackController() {
             if (!isNaN(startTimeOffset) && startTimeOffset < Math.max(streamInfo.manifestInfo.duration, streamInfo.duration) && startTimeOffset >= 0) {
                 presentationStartTime = startTimeOffset;
             } else {
-                let earliestTime = commonEarliestTime[streamInfo.id] || streamController.getActiveStreamCommonEarliestTime();
+                let earliestTime = commonEarliestTime[streamInfo.id]; //set by ready bufferStart after first onBytesAppended
+                if (earliestTime === undefined) {
+                    earliestTime = streamController.getActiveStreamCommonEarliestTime(); //deal with calculated PST that is none 0 when streamInfo.start is 0
+                }
                 presentationStartTime = Math.max(earliestTime, streamInfo.start);
             }
         }
@@ -311,9 +330,8 @@ function PlaybackController() {
     }
 
     function seekToStartTimeOffset() {
-        let initialSeekTime = getStreamStartTime(streamInfo, false);
-        if (!initialSeekCompleted && initialSeekTime > 0) {
-            initialSeekCompleted = true;
+        let initialSeekTime = getStreamStartTime(false);
+        if (initialSeekTime > 0) {
             seek(initialSeekTime);
             log('Starting playback at offset: ' + initialSeekTime);
         }
@@ -339,12 +357,6 @@ function PlaybackController() {
         streamInfo = info;
 
         updateCurrentTime();
-    }
-
-    function onLiveEdgeSearchCompleted(e) {
-        //This is here to catch the case when live edge search takes longer than playback metadata
-        if (e.error || element.readyState === 0) return;
-        seekToStartTimeOffset();
     }
 
     function onCanPlay() {
@@ -401,7 +413,7 @@ function PlaybackController() {
 
     function onPlaybackMetaDataLoaded() {
         log('Native video element event: loadedmetadata');
-        if (!isDynamic || timelineConverter.isTimeSyncCompleted()) {
+        if ((!isDynamic && streamInfo.isFirst) || timelineConverter.isTimeSyncCompleted()) {
             seekToStartTimeOffset();
         }
         eventBus.trigger(Events.PLAYBACK_METADATA_LOADED);
@@ -410,7 +422,7 @@ function PlaybackController() {
 
     function onPlaybackEnded() {
         log('Native video element event: ended');
-        element.autoplay = false;
+        pause();
         stopUpdatingWallclockTime();
         eventBus.trigger(Events.PLAYBACK_ENDED);
     }
@@ -428,12 +440,12 @@ function PlaybackController() {
         let ranges = e.bufferedRanges;
         if (!ranges || !ranges.length) return;
         let bufferedStart = Math.max(ranges.start(0), streamInfo.start);
-        commonEarliestTime[streamInfo.id] = commonEarliestTime[streamInfo.id] === undefined ? bufferedStart : Math.max(commonEarliestTime[streamInfo.id], bufferedStart);
-        //Commenting this out for now I do not believe it is still needed after fix for issue #1275.
-        //we still want to trap commonEarliestTime for use on seek back to zero.
-        //if (!getTime() < commonEarliestTime[streamInfo.id]) {
-        //    seek(getStreamStartTime(streamInfo, true));
-        //}
+        let earliestTime = commonEarliestTime[streamInfo.id] === undefined ? bufferedStart : Math.max(commonEarliestTime[streamInfo.id], bufferedStart);
+        if (earliestTime === commonEarliestTime[streamInfo.id]) return;
+        if (!isDynamic && getStreamStartTime(true) < earliestTime && getTime() < earliestTime) {
+            seek(earliestTime);
+        }
+        commonEarliestTime[streamInfo.id] = earliestTime;
     }
 
     function onBufferLevelStateChanged(e) {
@@ -479,7 +491,6 @@ function PlaybackController() {
         getTimeToStreamEnd: getTimeToStreamEnd,
         isPlaybackStarted: isPlaybackStarted,
         getStreamId: getStreamId,
-        getStreamDuration: getStreamDuration,
         getTime: getTime,
         getPlaybackRate: getPlaybackRate,
         getPlayedRanges: getPlayedRanges,

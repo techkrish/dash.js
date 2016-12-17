@@ -28,15 +28,15 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  */
-import XlinkController from './controllers/XlinkController.js';
-import XHRLoader from './XHRLoader.js';
-import URLUtils from './utils/URLUtils.js';
-import TextRequest from './vo/TextRequest.js';
-import Error from './vo/Error.js';
-import HTTPRequest from './vo/metrics/HTTPRequest.js';
-import EventBus from '../core/EventBus.js';
-import Events from '../core/events/Events.js';
-import FactoryMaker from '../core/FactoryMaker.js';
+import XlinkController from './controllers/XlinkController';
+import XHRLoader from './XHRLoader';
+import URLUtils from './utils/URLUtils';
+import TextRequest from './vo/TextRequest';
+import Error from './vo/Error';
+import {HTTPRequest} from './vo/metrics/HTTPRequest';
+import EventBus from '../core/EventBus';
+import Events from '../core/events/Events';
+import FactoryMaker from '../core/FactoryMaker';
 
 const MANIFEST_LOADER_ERROR_PARSING_FAILURE = 1;
 const MANIFEST_LOADER_ERROR_LOADING_FAILURE = 2;
@@ -84,17 +84,25 @@ function ManifestLoader(config) {
             request: request,
             success: function (data, textStatus, xhr) {
                 var actualUrl;
-                var baseUrl;
+                var baseUri;
 
                 // Handle redirects for the MPD - as per RFC3986 Section 5.1.3
+                // also handily resolves relative MPD URLs to absolute
                 if (xhr.responseURL && xhr.responseURL !== url) {
-                    baseUrl = urlUtils.parseBaseUrl(xhr.responseURL);
+                    baseUri = urlUtils.parseBaseUrl(xhr.responseURL);
                     actualUrl = xhr.responseURL;
                 } else {
-                    baseUrl = urlUtils.parseBaseUrl(url);
+                    // usually this case will be caught and resolved by
+                    // xhr.responseURL above but it is not available for IE11
+                    // baseUri must be absolute for BaseURL resolution later
+                    if (urlUtils.isRelative(url)) {
+                        url = urlUtils.resolve(url, window.location.href);
+                    }
+
+                    baseUri = urlUtils.parseBaseUrl(url);
                 }
 
-                const manifest = parser.parse(data, baseUrl, xlinkController);
+                const manifest = parser.parse(data, xlinkController);
 
                 if (manifest) {
                     manifest.url = actualUrl || url;
@@ -104,6 +112,7 @@ function ManifestLoader(config) {
                         manifest.originalUrl = manifest.url;
                     }
 
+                    manifest.baseUri = baseUri;
                     manifest.loadedTime = new Date();
                     xlinkController.resolveManifestOnLoad(manifest);
                 } else {
